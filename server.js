@@ -48,26 +48,22 @@ app.post('/generate-pdf', async (req, res) => {
 
 // --- SIMPLIFIED API Endpoint for SCROLLING VIDEO Generation ---
 app.post('/generate-video', async (req, res) => {
-    console.log('[API] Received request for Video generation.');
+    console.log('[API] Received request for /generate-video.');
     const { htmlContent, audioBufferBase64 } = req.body;
-    if (!htmlContent || !audioBufferBase64) {
-        return res.status(400).send({ error: 'htmlContent and audioBufferBase64 are required.' });
-    }
-
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
+    console.log(`[API LOG] Created temp directory: ${tempDir}`);
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
         const videoBuffer = await generateLetterVideo(audioBuffer, htmlContent, tempDir);
-        
-        console.log('[API] Video generated successfully.');
-        await fs.rm(tempDir, { recursive: true, force: true });
-        
+        console.log('[API LOG] Video buffer received. Sending response.');
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
-
     } catch (error) {
         console.error('[API] Video generation failed:', error);
         res.status(500).send({ error: 'Failed to generate video.' });
+    } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        console.log(`[API LOG] Cleaned up temp directory: ${tempDir}`);
     }
 });
 
@@ -76,15 +72,100 @@ app.post('/generate-video', async (req, res) => {
 
 async function generateLetterVideo(audioBuffer, htmlContent, tempDir) {
     const audioPath = path.join(tempDir, 'audio.wav');
-    const imagePath = path.join(tempDir, 'letter-image.png');
+    const headerPath = path.join(tempDir, 'header.png');
+    const bodyPath = path.join(tempDir, 'body.png');
     const videoPath = path.join(tempDir, 'output.mp4');
 
+    console.log('[API LOG] Writing audio buffer to file...');
     await fs.writeFile(audioPath, audioBuffer);
+    console.log('[API LOG] Getting audio duration...');
     const audioDuration = await getAudioDuration(audioPath);
-    await createScreenshotFromHtml(htmlContent, imagePath);
-    await createScrollingVideo(imagePath, audioPath, videoPath, audioDuration);
+    console.log(`[API LOG] Audio duration is ${audioDuration} seconds.`);
     
+    console.log('[API LOG] Starting image component generation...');
+    await createImageComponents(htmlContent, headerPath, bodyPath);
+    console.log('[API LOG] Finished image component generation.');
+
+    console.log('[API LOG] Starting optimized video creation...');
+    await createOptimizedScrollingVideo(headerPath, bodyPath, audioPath, videoPath, audioDuration);
+    console.log('[API LOG] Finished optimized video creation.');
+    
+    console.log('[API LOG] Reading final video file into buffer...');
     return await fs.readFile(videoPath);
+}
+
+async function createImageComponents(htmlContent, headerPath, bodyPath) {
+    console.log('[PUPPETEER] Launching browser...');
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome-stable', args: ['--no-sandbox'], headless: "new" });
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 1080 }); 
+        await page.goto(`data:text/html;charset=UTF-8,${encodeURIComponent(htmlContent)}`, { waitUntil: 'networkidle0' });
+        console.log('[PUPPETEER] Page content loaded.');
+
+        const headerElement = await page.$('.template-image');
+        if (headerElement) {
+            await headerElement.screenshot({ path: headerPath });
+            console.log(`[PUPPETEER] Header screenshot saved to ${headerPath}`);
+        } else {
+            throw new Error('Could not find header element with class "template-image"');
+        }
+
+        const bodyElement = await page.$('.content');
+        if (bodyElement) {
+            await bodyElement.screenshot({ path: bodyPath });
+            console.log(`[PUPPETEER] Body screenshot saved to ${bodyPath}`);
+        } else {
+            throw new Error('Could not find content element with class "content"');
+        }
+    } finally {
+        if (browser) await browser.close();
+        console.log('[PUPPETEER] Browser closed.');
+    }
+}
+
+
+async function createOptimizedScrollingVideo(headerPath, bodyPath, audioPath, outputPath, duration) {
+    console.log('[FFMPEG] Calculating video dimensions...');
+    const bodyDimensions = await getImageDimensions(bodyPath);
+    
+    const videoWidth = 1280;
+    const videoHeight = 720;
+    const headerHeight = 200;
+    const bodyScrollHeight = Math.max(0, bodyDimensions.height - (videoHeight - headerHeight));
+    console.log(`[FFMPEG] Body scroll height calculated: ${bodyScrollHeight}px`);
+
+    return new Promise((resolve, reject) => {
+        ffmpeg()
+            .input(headerPath)
+            .input(bodyPath)
+            .input(audioPath)
+            .complexFilter([
+                `color=s=${videoWidth}x${videoHeight}:c=black[canvas]`,
+                `[canvas][0:v]overlay=x=0:y=0[with_header]`,
+                `[with_header][1:v]overlay=x=(W-w)/2:y='${headerHeight} - (t/${duration})*${bodyScrollHeight}'`
+            ])
+            .outputOptions([
+                '-map', '2:a',
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p'
+            ])
+            .duration(duration)
+            .on('start', (commandLine) => {
+                console.log(`[FFMPEG] Started processing with command: ${commandLine}`);
+            })
+            .on('progress', (progress) => {
+                if (progress.percent) {
+                    console.log(`[FFMPEG] Encoding progress: ${progress.percent.toFixed(2)}%`);
+                }
+            })
+            .on('end', resolve)
+            .on('error', (err) => reject(new Error(`Optimized FFmpeg error: ${err.message}`)))
+            .save(outputPath);
+    });
 }
 
 async function createScreenshotFromHtml(htmlContent, outputPath) {
