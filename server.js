@@ -55,7 +55,6 @@ app.post('/generate-video', async (req, res) => {
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
         const videoBuffer = await generateLetterVideo(audioBuffer, htmlContent, tempDir);
-        console.log('[API LOG] Video buffer received. Sending response.');
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
     } catch (error) {
@@ -72,139 +71,73 @@ app.post('/generate-video', async (req, res) => {
 
 async function generateLetterVideo(audioBuffer, htmlContent, tempDir) {
     const audioPath = path.join(tempDir, 'audio.wav');
-    const headerPath = path.join(tempDir, 'header.png');
-    const bodyPath = path.join(tempDir, 'body.png');
+    const imagePath = path.join(tempDir, 'letter-image.png'); // We are back to one single image
     const videoPath = path.join(tempDir, 'output.mp4');
 
-    console.log('[API LOG] Writing audio buffer to file...');
     await fs.writeFile(audioPath, audioBuffer);
-    console.log('[API LOG] Getting audio duration...');
     const audioDuration = await getAudioDuration(audioPath);
-    console.log(`[API LOG] Audio duration is ${audioDuration} seconds.`);
     
-    console.log('[API LOG] Starting image component generation...');
-    await createImageComponents(htmlContent, headerPath, bodyPath);
-    console.log('[API LOG] Finished image component generation.');
-
-    console.log('[API LOG] Starting optimized video creation...');
-    await createOptimizedScrollingVideo(headerPath, bodyPath, audioPath, videoPath, audioDuration);
-    console.log('[API LOG] Finished optimized video creation.');
+    // Calls the new function to create one screenshot of the whole letter
+    await createFullLetterScreenshot(htmlContent, imagePath);
     
-    console.log('[API LOG] Reading final video file into buffer...');
+    // Uses the original scrolling video function
+    await createScrollingVideo(imagePath, audioPath, videoPath, audioDuration);
+    
     return await fs.readFile(videoPath);
 }
 
-async function createImageComponents(htmlContent, headerPath, bodyPath) {
-    console.log('[PUPPETEER] Launching browser...');
+async function createFullLetterScreenshot(htmlContent, outputPath) {
+    console.log('[PUPPETEER] Creating single screenshot of .container...');
     let browser = null;
     try {
         browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome-stable', args: ['--no-sandbox'], headless: "new" });
         const page = await browser.newPage();
-        await page.setViewport({ width: 1280, height: 1080 }); 
         await page.goto(`data:text/html;charset=UTF-8,${encodeURIComponent(htmlContent)}`, { waitUntil: 'networkidle0' });
         console.log('[PUPPETEER] Page content loaded.');
 
-        const headerElement = await page.$('.template-image');
-        if (headerElement) {
-            await headerElement.screenshot({ path: headerPath });
-            console.log(`[PUPPETEER] Header screenshot saved to ${headerPath}`);
+        const letterContainer = await page.$('.container');
+        if (letterContainer) {
+            await letterContainer.screenshot({ path: outputPath });
+            console.log(`[PUPPETEER] Screenshot of .container saved successfully.`);
         } else {
-            throw new Error('Could not find header element with class "template-image"');
-        }
-
-        const bodyElement = await page.$('.content');
-        if (bodyElement) {
-            await bodyElement.screenshot({ path: bodyPath });
-            console.log(`[PUPPETEER] Body screenshot saved to ${bodyPath}`);
-        } else {
-            throw new Error('Could not find content element with class "content"');
+            throw new Error('Could not find the main element with class="container" in the HTML.');
         }
     } finally {
         if (browser) await browser.close();
-        console.log('[PUPPETEER] Browser closed.');
     }
 }
 
 
-async function createOptimizedScrollingVideo(headerPath, bodyPath, audioPath, outputPath, duration) {
-    console.log('[FFMPEG] Calculating video dimensions...');
-    const bodyDimensions = await getImageDimensions(bodyPath);
-    
-    const videoWidth = 1280;
-    const videoHeight = 720;
-    const headerHeight = 200;
-    const bodyScrollHeight = Math.max(0, bodyDimensions.height - (videoHeight - headerHeight));
-    console.log(`[FFMPEG] Body scroll height calculated: ${bodyScrollHeight}px`);
 
-    return new Promise((resolve, reject) => {
-        ffmpeg()
-            .input(headerPath)
-            .input(bodyPath)
-            .input(audioPath)
-            .complexFilter([
-                `color=s=${videoWidth}x${videoHeight}:c=black[canvas]`,
-                `[canvas][0:v]overlay=x=0:y=0[with_header]`,
-                `[with_header][1:v]overlay=x=(W-w)/2:y='${headerHeight} - (t/${duration})*${bodyScrollHeight}'`
-            ])
-            .outputOptions([
-                '-map', '2:a',
-                '-c:v', 'libx264',
-                '-preset', 'veryfast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p'
-            ])
-            .duration(duration)
-            .on('start', (commandLine) => {
-                console.log(`[FFMPEG] Started processing with command: ${commandLine}`);
-            })
-            .on('progress', (progress) => {
-                if (progress.percent) {
-                    console.log(`[FFMPEG] Encoding progress: ${progress.percent.toFixed(2)}%`);
-                }
-            })
-            .on('end', resolve)
-            .on('error', (err) => reject(new Error(`Optimized FFmpeg error: ${err.message}`)))
-            .save(outputPath);
-    });
-}
-
-async function createScreenshotFromHtml(htmlContent, outputPath) {
-    let browser = null;
-    try {
-        browser = await puppeteer.launch({
-            executablePath: '/usr/bin/google-chrome-stable',
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            headless: "new"
-        });
-        const page = await browser.newPage();
-        await page.setViewport({ width: 1280, height: 720 });
-        await page.goto(`data:text/html;charset=UTF-8,${encodeURIComponent(htmlContent)}`, {
-            waitUntil: 'networkidle0',
-            timeout: 120000
-        });
-        await page.screenshot({ path: outputPath, type: 'png', fullPage: true });
-    } finally {
-        if (browser) await browser.close();
-    }
-}
 
 async function createScrollingVideo(imagePath, audioPath, outputPath, duration) {
     const imageDimensions = await getImageDimensions(imagePath);
     const videoHeight = 720;
-    const videoWidth = 1280;
+    const videoWidth = 1280; // Assuming you want a 1280x720 output
     const imageHeight = imageDimensions.height;
     const scrollHeight = Math.max(0, imageHeight - videoHeight);
 
+    console.log(`[FFMPEG] Starting video encoding. Scroll height: ${scrollHeight}px`);
+
     return new Promise((resolve, reject) => {
         ffmpeg()
-            .input(imagePath).loop()
+            .input(imagePath)
+            .loop()
             .input(audioPath)
-            .videoCodec('libx264').audioCodec('aac').audioBitrate('192k')
+            .videoCodec('libx264')
+            .audioCodec('aac')
+            .audioBitrate('192k')
             .outputOptions(['-preset veryfast', '-crf 23', '-pix_fmt yuv420p'])
-            .complexFilter([`color=s=${videoWidth}x${videoHeight}:c=black[bg]; [bg][0:v]overlay=x=(W-w)/2:y='-t/${duration}*${scrollHeight}'[out]`])
+            .complexFilter([
+                // This filter places your letter image on a canvas and scrolls it
+                `color=s=${videoWidth}x${videoHeight}:c=white[bg]; [bg][0:v]overlay=x=(W-w)/2:y='-t/${duration}*${scrollHeight}'[out]`
+            ])
             .duration(duration)
             .outputOptions("-map", "[out]", "-map", "1:a")
-            .on('end', resolve)
+            .on('end', () => {
+                console.log('[FFMPEG] Video encoding finished.');
+                resolve();
+            })
             .on('error', (err) => reject(new Error(`FFmpeg error: ${err.message}`)))
             .save(outputPath);
     });
