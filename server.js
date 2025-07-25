@@ -183,6 +183,18 @@ function getAudioDuration(audioPath) {
     });
 }
 
+function getImageDimensions(imagePath) {
+     return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(imagePath, (err, metadata) => {
+            if (err || !metadata.streams[0] || !metadata.streams[0].width || !metadata.streams[0].height) {
+                return reject(new Error(`Could not get image dimensions: ${err?.message || 'Unknown error'}`));
+            }
+            resolve({ width: metadata.streams[0].width, height: metadata.streams[0].height });
+        });
+    });
+}
+
+
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
     const videoWidth = 1280;
     const videoHeight = 720;
