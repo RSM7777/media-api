@@ -6,10 +6,6 @@ import ffmpeg from 'fluent-ffmpeg';
 import { createCanvas, registerFont, loadImage } from 'canvas';
 import puppeteer from 'puppeteer-core';
 
-// --- GLOBAL BROWSER INSTANCE ---
-// We will launch one browser when the server starts and reuse it.
-let browserInstance;
-
 // --- FFMPEG & FONT SETUP ---
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
@@ -21,16 +17,14 @@ registerFont(FONT_PATH, { family: 'Lato' });
 const TITLE_FONT_PATH = path.join(process.cwd(), 'fonts', 'PlayfairDisplay-Bold.ttf');
 registerFont(TITLE_FONT_PATH, { family: 'Playfair Display' });
 
+// --- GLOBAL BROWSER INSTANCE ---
+let browserInstance;
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 // --- API ENDPOINT ---
 app.post('/generate-video', async (req, res) => {
     const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
-    if (!audioBufferBase64) {
-        return res.status(400).send({ error: 'Audio data is missing.' });
-    }
-    
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
@@ -55,7 +49,6 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     await fs.writeFile(audioPath, audioBuffer);
     const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
 
-    // Use Puppeteer for the header, Canvas for the body
     const headerImage = await renderSvgWithPuppeteer(templateSvgPath, headerPath);
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
@@ -68,24 +61,13 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
 
 // --- HELPER FUNCTIONS ---
 
-/**
- * Uses the persistent browser instance for fast, high-quality SVG rendering.
- */
 async function renderSvgWithPuppeteer(svgPath, outputPath) {
-    if (!browserInstance) {
-        throw new Error('Browser is not initialized.');
-    }
     let page = null;
     try {
         page = await browserInstance.newPage();
-        await page.setViewport({ width: 1280, height: 720 });
-        const svgContent = await fs.readFile(svgPath, 'utf-8');
-        await page.setContent(`
-            <html><body style="margin:0;padding:0;">${svgContent}</body></html>
-        `);
+        await page.goto(`file://${svgPath}`);
         const svgElement = await page.$('svg');
         if (!svgElement) throw new Error('SVG element not found in template file.');
-        
         await svgElement.screenshot({ path: outputPath, omitBackground: true });
         return await getImageDimensions(outputPath);
     } finally {
@@ -104,28 +86,24 @@ function getImageDimensions(imagePath) {
     });
 }
 
-/**
- * Renders all text components with correct styling and layout using node-canvas.
- */
 async function renderTextToImage(letterData, outputPath) {
-    const canvasWidth = 1040;
-    const padding = 40;
-    const textBlockWidth = canvasWidth - (2 * padding);
-    
+    const textBlockWidth = 800;
+    const canvasWidth = 800;
+    const fontSize = 24; const lineHeight = 36; const padding = 40;
     const tempCtx = createCanvas(1, 1).getContext('2d');
     let currentY = padding;
 
-    tempCtx.font = '700 48px "Playfair Display"';
+    tempCtx.font = `700 48px "Playfair Display"`;
     const titleLines = wrapText(tempCtx, letterData.title || '', textBlockWidth);
     currentY += titleLines.length * 60;
     currentY += 60;
     
-    tempCtx.font = '24px Lato';
+    tempCtx.font = `${fontSize}px Lato`;
     const contentLines = wrapText(tempCtx, letterData.content || '', textBlockWidth);
     currentY += contentLines.length * 44;
     currentY += 60;
     
-    tempCtx.font = 'italic 28px "Playfair Display"';
+    tempCtx.font = `italic 28px "Playfair Display"`;
     currentY += 40;
     const canvasHeight = currentY + padding;
 
@@ -136,7 +114,7 @@ async function renderTextToImage(letterData, outputPath) {
 
     currentY = padding;
 
-    ctx.font = '700 48px "Playfair Display"';
+    ctx.font = `700 48px "Playfair Display"`;
     ctx.fillStyle = '#333';
     ctx.textAlign = 'center';
     for (const line of titleLines) {
@@ -145,7 +123,7 @@ async function renderTextToImage(letterData, outputPath) {
     }
     currentY += 60;
 
-    ctx.font = '24px Lato';
+    ctx.font = `${fontSize}px Lato`;
     ctx.fillStyle = '#444';
     ctx.textAlign = 'left';
     for (const line of contentLines) {
@@ -154,7 +132,7 @@ async function renderTextToImage(letterData, outputPath) {
     }
     currentY += 60;
 
-    ctx.font = 'italic 28px "Playfair Display"';
+    ctx.font = `italic 28px "Playfair Display"`;
     ctx.fillStyle = '#555';
     const authorText = `- ${letterData.authorName || ''}`;
     ctx.fillText(authorText, padding, currentY);
@@ -191,10 +169,17 @@ function getAudioDuration(audioPath) {
     });
 }
 
+/**
+ * FINAL STABLE VERSION of the FFmpeg command.
+ * It forces both images to the correct width before combining them.
+ */
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
     const videoWidth = 1280;
     const videoHeight = 720;
-    const totalImageHeight = headerImage.height + bodyImage.height;
+    
+    // Calculate the final height of the header after it's been scaled to 1280px wide
+    const scaledHeaderHeight = Math.round(videoWidth * (headerImage.height / headerImage.width));
+    const totalImageHeight = scaledHeaderHeight + bodyImage.height; 
     const scrollHeight = Math.max(0, totalImageHeight - videoHeight);
 
     return new Promise((resolve, reject) => {
@@ -203,14 +188,18 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
             .input(bodyPath)
             .input(audioPath)
             .complexFilter([
-                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
-                `[0:v][padded_body]vstack=inputs=2[letter]`,
+                // Take header [0:v], scale it to 1280 wide (maintaining aspect ratio), and name it [header]
+                `[0:v]scale=${videoWidth}:-1[header]`,
+                // Take body [1:v], pad it to 1280 wide, and name it [body]
+                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[body]`,
+                // Stack the correctly sized header and body
+                `[header][body]vstack=inputs=2[letter]`,
+                // Create the background and overlay the scrolling letter
                 `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
-                `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
+                `[bg][letter]overlay=x=0:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
             .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
-            .toFormat('mp4')
             .on('end', resolve)
             .on('error', (err, stdout, stderr) => {
                 console.error('--- FFMPEG STDERR ---', stderr);
