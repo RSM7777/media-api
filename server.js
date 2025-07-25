@@ -21,16 +21,13 @@ registerFont(FONT_PATH, { family: 'Lato' });
 
 
 app.post('/generate-video', async (req, res) => {
-    console.log('[API] Received request for /generate-video.');
-    const { htmlContent, audioBufferBase64 } = req.body;
-    if (!htmlContent || !audioBufferBase64) {
-        return res.status(400).send({ error: 'htmlContent and audioBufferBase64 are required.' });
-    }
-
+    // The API now expects raw data in the request body
+    const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
-        const videoBuffer = await generateFastVideo(audioBuffer, htmlContent, tempDir);
+        // Pass the raw data down to the video generator
+        const videoBuffer = await generateFastVideo(audioBuffer, { title, content, authorName, templateId }, tempDir);
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
     } catch (error) {
@@ -43,23 +40,19 @@ app.post('/generate-video', async (req, res) => {
 
 
 // --- VIDEO ORCHESTRATION ---
-async function generateFastVideo(audioBuffer, htmlContent, tempDir) {
+async function generateFastVideo(audioBuffer, letterData, tempDir) {
     const audioPath = path.join(tempDir, 'audio.wav');
     const headerPath = path.join(tempDir, 'header.png');
     const bodyPath = path.join(tempDir, 'body.png');
     const videoPath = path.join(tempDir, 'output.mp4');
 
     await fs.writeFile(audioPath, audioBuffer);
-
-    // Extract SVG and Text from the incoming HTML
-    const svgBase64 = extractSvgBase64(htmlContent);
-    const text = htmlToText(htmlContent, { selectors: [{ selector: 'div.content', format: 'inline' }] });
-
-    const svgBuffer = Buffer.from(svgBase64, 'base64');
     
-    // Generate images using canvas
-    const headerImage = await renderSvgToPng(svgBuffer, headerPath);
-    const bodyImage = await renderTextToImage(text, bodyPath);
+    // The API now finds the template SVG based on the ID it receives
+    const templateSvgPath = path.join(process.cwd(), 'test-data', `template.svg`); // Simplified to use one template for the test
+
+    const headerImage = await renderSvgToPng(templateSvgPath, headerPath);
+    const bodyImage = await renderTextToImage(letterData, bodyPath); // Pass all text data to the renderer
     const audioDuration = await getAudioDuration(audioPath);
     
     await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
@@ -77,7 +70,8 @@ function extractSvgBase64(html) {
     return match[1];
 }
 
-async function renderSvgToPng(svgBuffer, outputPath) {
+async function renderSvgToPng(svgPath, outputPath) {
+    const svgBuffer = await fs.readFile(svgPath);
     const image = await loadImage(svgBuffer);
     const aspectRatio = image.width / image.height;
     const targetWidth = 1280;
@@ -90,37 +84,93 @@ async function renderSvgToPng(svgBuffer, outputPath) {
     return { width: targetWidth, height: targetHeight };
 }
 
-async function renderTextToImage(text, outputPath) {
-    const textBlockWidth = 800; const canvasWidth = 800;
-    const fontSize = 24; const lineHeight = 36;
-    const tempCanvas = createCanvas(canvasWidth, 1);
-    const ctx = tempCanvas.getContext('2d');
-    ctx.font = `${fontSize}px Lato`;
+async function renderTextToImage(letterData, outputPath) {
+    const canvasWidth = 1040; // The width of the final text block
+    const padding = 40;
+    const textBlockWidth = canvasWidth - (2 * padding);
     
-    const words = text.split(' ');
-    let line = ''; const lines = [];
-    for (const word of words) {
-        const testLine = line + (line ? ' ' : '') + word;
-        if (ctx.measureText(testLine).width > textBlockWidth && line !== '') {
-            lines.push(line);
-            line = word;
-        } else {
-            line = testLine;
-        }
-    }
-    lines.push(line);
+    const tempCtx = createCanvas(1, 1).getContext('2d');
+    let currentY = padding;
 
-    const canvasHeight = (lines.length * lineHeight);
+    // --- Calculate layout for all text elements to determine final image height ---
+    tempCtx.font = '700 48px "Playfair Display"';
+    const titleLines = wrapText(tempCtx, letterData.title || 'Your Title', textBlockWidth);
+    currentY += titleLines.length * 60; // 60px line height for title
+    
+    currentY += 60; // Space after title
+    
+    tempCtx.font = '24px Lato';
+    const contentLines = wrapText(tempCtx, letterData.content || '', textBlockWidth);
+    currentY += contentLines.length * 44; // 44px line height for content
+
+    currentY += 60; // Space after content
+    
+    tempCtx.font = 'italic 28px "Playfair Display"';
+    const authorText = `- ${letterData.authorName || ''}`;
+    currentY += 40; // line height for author
+
+    const canvasHeight = currentY + padding;
+
+    // --- Create final canvas and draw everything ---
     const finalCanvas = createCanvas(canvasWidth, canvasHeight);
-    const finalCtx = finalCanvas.getContext('2d');
-    finalCtx.fillStyle = '#fff'; finalCtx.fillRect(0, 0, canvasWidth, canvasHeight);
-    finalCtx.font = `${fontSize}px Lato`; finalCtx.fillStyle = '#444'; finalCtx.textBaseline = 'top';
-    for (let i = 0; i < lines.length; i++) {
-        finalCtx.fillText(lines[i], 0, (i * lineHeight));
+    const ctx = finalCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    currentY = padding;
+
+    // Draw Title
+    ctx.font = '700 48px "Playfair Display"';
+    ctx.fillStyle = '#333';
+    ctx.textAlign = 'center';
+    for (const line of titleLines) {
+        ctx.fillText(line, canvasWidth / 2, currentY);
+        currentY += 60;
     }
+    currentY += 60;
+
+    // Draw Content
+    ctx.font = '24px Lato';
+    ctx.fillStyle = '#444';
+    ctx.textAlign = 'left';
+    for (const line of contentLines) {
+        ctx.fillText(line, padding, currentY);
+        currentY += 44;
+    }
+    currentY += 60;
+
+    // Draw Author
+    ctx.font = 'italic 28px "Playfair Display"';
+    ctx.fillStyle = '#555';
+    ctx.textAlign = 'left';
+    ctx.fillText(authorText, padding, currentY);
+
     const buffer = finalCanvas.toBuffer('image/png');
     await fs.writeFile(outputPath, buffer);
     return { width: canvasWidth, height: canvasHeight };
+}
+
+function wrapText(context, text, maxWidth) {
+    const words = text.replace(/\n/g, ' \n ').split(' ');
+    const lines = [];
+    let currentLine = '';
+
+    for (const word of words) {
+        if (word === '\n') {
+            lines.push(currentLine);
+            currentLine = '';
+            continue;
+        }
+        const testLine = currentLine + (currentLine ? ' ' : '') + word;
+        if (context.measureText(testLine).width > maxWidth && currentLine !== '') {
+            lines.push(currentLine);
+            currentLine = word;
+        } else {
+            currentLine = testLine;
+        }
+    }
+    lines.push(currentLine);
+    return lines;
 }
 
 function getAudioDuration(audioPath) {
