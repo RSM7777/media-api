@@ -51,8 +51,8 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     
     const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
 
-    // Use the reliable Puppeteer method for the header, and fast canvas for the body
-    const headerImage = await renderSvgToPng_Puppeteer(templateSvgPath, headerPath);
+    // Use the new, fast canvas method for BOTH images
+    const headerImage = await renderSvgToPng(templateSvgPath, headerPath);
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     
@@ -125,17 +125,35 @@ function extractSvgBase64(html) {
     return match[1];
 }
 
+/**
+ * FINAL VERSION: Renders SVG to PNG at high quality WITHOUT Puppeteer.
+ */
 async function renderSvgToPng(svgPath, outputPath) {
-    const svgBuffer = await fs.readFile(svgPath);
-    const image = await loadImage(svgBuffer);
-    const canvas = createCanvas(image.width, image.height);
+    console.log('[CANVAS] Rendering SVG to PNG with correct aspect ratio...');
+    const svgContent = await fs.readFile(svgPath, 'utf-8');
+    
+    // Manually parse width/height from the SVG tag to get the correct aspect ratio
+    const widthMatch = svgContent.match(/width="(\d+)"/);
+    const heightMatch = svgContent.match(/height="(\d+)"/);
+    if (!widthMatch || !heightMatch) {
+        throw new Error('SVG file must have explicit width and height attributes.');
+    }
+    const width = parseInt(widthMatch[1], 10);
+    const height = parseInt(heightMatch[1], 10);
+    const aspectRatio = width / height;
+
+    // Render it to a high-quality PNG
+    const targetWidth = 1280;
+    const targetHeight = Math.round(targetWidth / aspectRatio);
+
+    const image = await loadImage(Buffer.from(svgContent));
+    const canvas = createCanvas(targetWidth, targetHeight);
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(image, 0, 0);
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+    
     const pngBuffer = canvas.toBuffer('image/png');
     await fs.writeFile(outputPath, pngBuffer);
-    // We still need the dimensions for the scroll calculation
-    const headerDimensions = await getImageDimensions(outputPath);
-    return headerDimensions;
+    return { width: targetWidth, height: targetHeight };
 }
 
 async function renderTextToImage(letterData, outputPath) {
