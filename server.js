@@ -91,6 +91,7 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     const headerPath = path.join(tempDir, 'header.png');
     const bodyPath = path.join(tempDir, 'body.png');
     const videoPath = path.join(tempDir, 'output.mp4');
+
     await fs.writeFile(audioPath, audioBuffer);
     
     let headerImage;
@@ -98,15 +99,20 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
         const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
         headerImage = await renderSvgWithPuppeteer(templateSvgPath, headerPath);
     } else {
-        // Create a tiny transparent png if no template is provided
-        const canvas = createCanvas(1, 1);
+        // --- THIS IS THE FIX ---
+        // Create a 1280px wide, 1px high transparent image as a placeholder.
+        console.log('[API] No templateId provided. Creating a correct-width placeholder.');
+        const canvas = createCanvas(1280, 1);
+        // The fillRect is not strictly necessary as canvas is transparent by default
         await fs.writeFile(headerPath, canvas.toBuffer('image/png'));
-        headerImage = { width: 1, height: 1 };
+        headerImage = { width: 1280, height: 1 };
+        // --- END OF FIX ---
     }
 
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
+    
     return await fs.readFile(videoPath);
 }
 
