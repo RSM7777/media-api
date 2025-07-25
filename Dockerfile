@@ -1,38 +1,41 @@
-# Start from the official Azure App Service Node.js 20 image
-FROM mcr.microsoft.com/appsvc/node:20-lts
+# Update package lists
+sudo apt-get update
 
-# Install system dependencies for Canvas, FFmpeg, and Puppeteer
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libcairo2-dev \
-    libpango1.0-dev \
-    libjpeg-dev \
-    libgif-dev \
-    librsvg2-dev \
-    ffmpeg \
-    # Add Puppeteer dependencies
-    libgbm-dev \
-    libnss3 \
-    libxss1 \
+# Install all dependencies for Puppeteer/Chrome and Canvas
+sudo apt-get install -y \
+    ca-certificates \
+    fonts-liberation \
+    libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
     libgtk-3-0 \
-    && rm -rf /var/lib/apt/lists/*
+    libnspr4 \
+    libnss3 \
+    libx11-6 \
+    libx11-xcb1 \
+
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    lsb-release \
+    wget \
+    xdg-utils \
+    --no-install-recommends
 
 # Download and install Google Chrome
-RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
-    && rm google-chrome-stable_current_amd64.deb
-
-# Set the working directory
-WORKDIR /home/site/wwwroot
-
-# Copy and install dependencies
-COPY package*.json ./
-RUN npm install --production
-
-# Copy the rest of your app code
-COPY . .
-
-# Command to run the server
-CMD ["npm", "start"]
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+rm google-chrome-stable_current_amd64.deb
