@@ -1,8 +1,7 @@
 # Start from the official Azure App Service Node.js 20 image
 FROM mcr.microsoft.com/appsvc/node:20-lts
 
-# Install all system dependencies ONCE during the build
-# This is the slow part that will now happen before deployment
+# Install system dependencies for Canvas, FFmpeg, and Puppeteer
 RUN apt-get update && apt-get install -y \
     build-essential \
     libcairo2-dev \
@@ -11,17 +10,29 @@ RUN apt-get update && apt-get install -y \
     libgif-dev \
     librsvg2-dev \
     ffmpeg \
+    # Add Puppeteer dependencies
+    libgbm-dev \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory inside the container
+# Download and install Google Chrome
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
+    && rm google-chrome-stable_current_amd64.deb
+
+# Set the working directory
 WORKDIR /home/site/wwwroot
 
-# Copy package files and install Node.js dependencies
+# Copy and install dependencies
 COPY package*.json ./
 RUN npm install --production
 
-# Copy the rest of your application code (server.js, fonts folder, etc.)
+# Copy the rest of your app code
 COPY . .
 
-# The command that will run when the container starts
+# Command to run the server
 CMD ["npm", "start"]

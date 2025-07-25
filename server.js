@@ -5,6 +5,8 @@ import os from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import { createCanvas, registerFont, loadImage } from 'canvas';
 import { htmlToText } from 'html-to-text';
+import puppeteer from 'puppeteer-core'; // We need puppeteer back for this one task
+
 
 // --- FFMPEG SETUP ---
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
@@ -47,19 +49,57 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
 
     await fs.writeFile(audioPath, audioBuffer);
     
-    // --- THIS IS THE KEY CHANGE ---
-    // Use the templateId to build the correct path to the SVG file
     const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
-    console.log(`Loading template: ${templateSvgPath}`);
-    // --- END OF CHANGE ---
 
-    const headerImage = await renderSvgToPng(templateSvgPath, headerPath);
+    // Use the reliable Puppeteer method for the header, and fast canvas for the body
+    const headerImage = await renderSvgToPng_Puppeteer(templateSvgPath, headerPath);
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     
     await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
     
     return await fs.readFile(videoPath);
+}
+
+async function renderSvgToPng_Puppeteer(svgPath, outputPath) {
+    console.log('[PUPPETEER] Rendering SVG to PNG for perfect quality...');
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({
+            executablePath: '/usr/bin/google-chrome-stable',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        const page = await browser.newPage();
+        const svgContent = await fs.readFile(svgPath, 'utf-8');
+        
+        // Set the page content to only the SVG
+        await page.setContent(`
+            <html>
+                <body style="margin: 0; padding: 0;">${svgContent}</body>
+            </html>
+        `);
+        
+        const svgElement = await page.$('svg');
+        if (!svgElement) throw new Error('SVG element not found in template file.');
+
+        await svgElement.screenshot({ path: outputPath });
+        
+        console.log(`[PUPPETEER] Header image saved successfully.`);
+        return await getImageDimensions(outputPath);
+    } finally {
+        if (browser) await browser.close();
+    }
+}
+
+function getImageDimensions(imagePath) {
+     return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(imagePath, (err, metadata) => {
+            if (err || !metadata.streams[0]?.width || !metadata.streams[0]?.height) {
+                return reject(new Error(`Could not get image dimensions: ${err?.message || 'Unknown error'}`));
+            }
+            resolve({ width: metadata.streams[0].width, height: metadata.streams[0].height });
+        });
+    });
 }
 
 // --- HELPER FUNCTIONS ---
@@ -183,16 +223,7 @@ function getAudioDuration(audioPath) {
     });
 }
 
-function getImageDimensions(imagePath) {
-     return new Promise((resolve, reject) => {
-        ffmpeg.ffprobe(imagePath, (err, metadata) => {
-            if (err || !metadata.streams[0] || !metadata.streams[0].width || !metadata.streams[0].height) {
-                return reject(new Error(`Could not get image dimensions: ${err?.message || 'Unknown error'}`));
-            }
-            resolve({ width: metadata.streams[0].width, height: metadata.streams[0].height });
-        });
-    });
-}
+
 
 
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
