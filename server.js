@@ -22,6 +22,59 @@ let browserInstance;
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+async function buildPdfHtml(letterData) {
+    const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
+    let templateImageUrl = null;
+    try {
+        const svgBuffer = await fs.readFile(templateSvgPath);
+        templateImageUrl = `data:image/svg+xml;base64,${svgBuffer.toString('base64')}`;
+    } catch (e) {
+        console.warn(`Could not load template SVG for PDF for ID: ${letterData.templateId}`);
+    }
+
+    // This uses the same HTML structure from your original template
+    return `
+        <!DOCTYPE html><html><head><style>
+            body { margin: 0; font-family: 'Lato', sans-serif; }
+            .container { padding: 40px; }
+            .header-image { width: 100%; margin-bottom: 40px; }
+            .title { font-size: 48px; font-family: 'Playfair Display', serif; text-align: center; }
+            .content { font-size: 16px; line-height: 1.7; }
+            .author { margin-top: 40px; font-style: italic; }
+        </style></head><body>
+            <div class="container">
+                ${templateImageUrl ? `<img src="${templateImageUrl}" class="header-image" />` : ''}
+                <h1 class="title">${letterData.title || ''}</h1>
+                <div class="content">${letterData.content || ''}</div>
+                <p class="author">- ${letterData.authorName || ''}</p>
+            </div>
+        </body></html>
+    `;
+}  
+
+app.post('/generate-pdf', async (req, res) => {
+    console.log('[API] Received request for /generate-pdf.');
+    if (!browserInstance) {
+        return res.status(503).send({ error: 'Browser service is not ready.' });
+    }
+    let page = null;
+    try {
+        const htmlContent = await buildPdfHtml(req.body); // Build HTML on the server
+        page = await browserInstance.newPage();
+        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: { top: "25px", bottom: "25px", left: "25px", right: "25px" } });
+        console.log('[API] PDF generated successfully.');
+        res.setHeader('Content-Type', 'application/pdf');
+        res.send(pdfBuffer);
+    } catch (error) {
+        console.error('[API] PDF generation failed:', error);
+        res.status(500).send({ error: 'Failed to generate PDF.' });
+    } finally {
+        if (page) await page.close();
+    }
+});
+
+
 // --- API ENDPOINT ---
 app.post('/generate-video', async (req, res) => {
     const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
