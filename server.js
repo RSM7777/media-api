@@ -5,7 +5,7 @@ import os from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import { createCanvas, registerFont, loadImage } from 'canvas';
 import puppeteer from 'puppeteer-core';
-
+import { htmlToText } from 'html-to-text';
 // --- FFMPEG & FONT SETUP ---
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
@@ -145,9 +145,18 @@ function getImageDimensions(imagePath) {
 }
 
 async function renderTextToImage(letterData, outputPath) {
-    const textBlockWidth = 800;
-    const canvasWidth = 800;
-    const fontSize = 24; const lineHeight = 36; const padding = 40;
+    // --- THIS IS THE FIX ---
+    // Convert the incoming HTML content to clean, plain text
+    const plainTextContent = htmlToText(letterData.content || '', {
+        wordwrap: false,
+        selectors: [ { selector: 'a', options: { ignoreHref: true } } ]
+    });
+    // --- END OF FIX ---
+
+    const canvasWidth = 1040;
+    const padding = 40;
+    const textBlockWidth = canvasWidth - (2 * padding);
+    
     const tempCtx = createCanvas(1, 1).getContext('2d');
     let currentY = padding;
 
@@ -156,8 +165,9 @@ async function renderTextToImage(letterData, outputPath) {
     currentY += titleLines.length * 60;
     currentY += 60;
     
-    tempCtx.font = `${fontSize}px Lato`;
-    const contentLines = wrapText(tempCtx, letterData.content || '', textBlockWidth);
+    tempCtx.font = `24px Lato`;
+    // Use the new plainTextContent variable here
+    const contentLines = wrapText(tempCtx, plainTextContent, textBlockWidth);
     currentY += contentLines.length * 44;
     currentY += 60;
     
@@ -181,9 +191,10 @@ async function renderTextToImage(letterData, outputPath) {
     }
     currentY += 60;
 
-    ctx.font = `${fontSize}px Lato`;
+    ctx.font = `24px Lato`;
     ctx.fillStyle = '#444';
     ctx.textAlign = 'left';
+    // And also use the new plainTextContent here
     for (const line of contentLines) {
         ctx.fillText(line, padding, currentY);
         currentY += 44;
