@@ -21,12 +21,26 @@ registerFont(FONT_PATH, { family: 'Lato' });
 
 
 app.post('/generate-video', async (req, res) => {
-    // The API now expects raw data in the request body
+    console.log('[API] Received request for /generate-video.');
     const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
+    
+    // --- AUDIO DEBUG LOG #1: Check if data was received ---
+    console.log(`[AUDIO DEBUG] Received audioBufferBase64 with length: ${audioBufferBase64 ? audioBufferBase64.length : '0'}`);
+
+    if (!audioBufferBase64 || audioBufferBase64.length < 100) {
+        return res.status(400).send({ error: 'Audio data is missing or empty.' });
+    }
+
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
-        // Pass the raw data down to the video generator
+        
+        // --- AUDIO DEBUG LOG #2: Check if data was decoded correctly ---
+        console.log(`[AUDIO DEBUG] Decoded audioBuffer with size: ${audioBuffer.length} bytes.`);
+        if (audioBuffer.length < 100) { // A valid WAV file header is ~44 bytes, so < 100 is suspicious.
+             console.error('[AUDIO DEBUG] Audio buffer is too small. It might be empty or corrupt.');
+        }
+
         const videoBuffer = await generateFastVideo(audioBuffer, { title, content, authorName, templateId }, tempDir);
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
@@ -37,6 +51,7 @@ app.post('/generate-video', async (req, res) => {
         await fs.rm(tempDir, { recursive: true, force: true });
     }
 });
+
 
 
 // --- VIDEO ORCHESTRATION ---
@@ -194,16 +209,23 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
             .input(bodyPath)
             .input(audioPath)
             .complexFilter([
-                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
+                `[1:v]pad=width=1280:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
                 `[0:v][padded_body]vstack=inputs=2[letter]`,
-                `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
+                `color=s=1280x720:c=white[bg]`,
                 `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
             .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
             .toFormat('mp4')
             .on('end', resolve)
-            .on('error', (err) => reject(new Error(`FFMPEG failed: ${err.message}`)))
+            // --- ADDED DETAILED ERROR LOGGING ---
+            .on('error', (err, stdout, stderr) => {
+                console.error('--- FFMPEG ERROR ---');
+                console.error('Error message:', err.message);
+                console.error('--- FFMPEG STDERR ---');
+                console.error(stderr);
+                reject(new Error(`FFMPEG failed: ${err.message}`));
+            })
             .save(outputPath);
     });
 }
