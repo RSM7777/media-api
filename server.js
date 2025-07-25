@@ -242,25 +242,33 @@ function getAudioDuration(audioPath) {
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
     const videoWidth = 1280;
     const videoHeight = 720;
-    
-    const scaledHeaderHeight = Math.round(videoWidth * (headerImage.height / headerImage.width));
-    const totalImageHeight = scaledHeaderHeight + bodyImage.height;
+    const headerHeight = headerImage.height;
+    const totalImageHeight = headerHeight + bodyImage.height;
     const scrollHeight = Math.max(0, totalImageHeight - videoHeight);
 
     return new Promise((resolve, reject) => {
         ffmpeg()
-            .input(headerPath)
-            .input(bodyPath)
-            .input(audioPath)
+            .input(headerPath)             // Input [0:v]
+            .input(bodyPath)               // Input [1:v]
+            .input(audioPath)              // Input [2:a]
             .complexFilter([
-                // `[0:v]scale=${videoWidth}:-1[scaled_header]`,
+                // Pad the body image to be 1280px wide to match the header
                 `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
-                `[scaled_header][padded_body]vstack=inputs=2[letter]`,
-                // THIS LINE IS NOW CORRECTED
+                // CORRECTED: Use the original header stream [0:v]
+                `[0:v][padded_body]vstack=inputs=2[letter]`,
+                // Create the final video background
                 `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
+                // Overlay and scroll the 'letter'
                 `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
-            .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
+            .outputOptions([
+                '-map', '[out]',
+                '-map', '2:a',
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv4p'
+            ])
             .duration(audioDuration)
             .toFormat('mp4')
             .on('end', resolve)
