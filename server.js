@@ -61,6 +61,9 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     return await fs.readFile(videoPath);
 }
 
+/**
+ * FINAL, CORRECTED VERSION: Renders the SVG at high resolution for perfect quality.
+ */
 async function renderSvgToPng_Puppeteer(svgPath, outputPath) {
     console.log('[PUPPETEER] Rendering SVG to PNG for perfect quality...');
     let browser = null;
@@ -70,12 +73,22 @@ async function renderSvgToPng_Puppeteer(svgPath, outputPath) {
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+
+        // Set the browser viewport to the final video width
+        await page.setViewport({ width: 1280, height: 720 });
+
         const svgContent = await fs.readFile(svgPath, 'utf-8');
         
-        // Set the page content to only the SVG
+        // Set page content with CSS to make the SVG fill the width
         await page.setContent(`
             <html>
-                <body style="margin: 0; padding: 0;">${svgContent}</body>
+              <head>
+                <style>
+                  body, html { margin: 0; padding: 0; }
+                  svg { width: 100%; height: auto; display: block; }
+                </style>
+              </head>
+              <body>${svgContent}</body>
             </html>
         `);
         
@@ -84,7 +97,7 @@ async function renderSvgToPng_Puppeteer(svgPath, outputPath) {
 
         await svgElement.screenshot({ path: outputPath });
         
-        console.log(`[PUPPETEER] Header image saved successfully.`);
+        console.log(`[PUPPETEER] High-quality header image saved successfully.`);
         return await getImageDimensions(outputPath);
     } finally {
         if (browser) await browser.close();
@@ -239,14 +252,6 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
             .input(headerPath)
             .input(bodyPath)
             .input(audioPath)
-            .complexFilter([
-                `[0:v]scale=${videoWidth}:-1[scaled_header]`,
-                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
-                `[scaled_header][padded_body]vstack=inputs=2[letter]`,
-                // THIS LINE IS NOW CORRECTED
-                `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
-                `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
-            ])
             .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
             .toFormat('mp4')
