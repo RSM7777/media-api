@@ -16,7 +16,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 // --- FONT REGISTRATION ---
-const FONT_PATH = path.join(process.cwd(), 'fonts', 'Lato-Regular.ttf');
+const FONT_PATH = path.join(process.cwd(), 'test-data', 'Lato-Regular.ttf');
 registerFont(FONT_PATH, { family: 'Lato' });
 
 
