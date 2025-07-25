@@ -19,7 +19,7 @@ async function main() {
             title: "A Letter to a Friend",
             content: "If you're reading this letter, it means you've reached a moment in life where words, memories, and meaning matter. Maybe you're sitting by a window watching the rain fall. Maybe it's 2 AM and the world is asleep, but your mind is wide awake, searching for something real. Whatever the case—I'm glad you're here.\n\nLet's go back for a moment. Remember the days when everything felt new? The world was a canvas, and we were the artists. We painted our dreams with bold strokes, unafraid of making mistakes.",
             authorName: "Someone Who Cares",
-            templateId: "1", // This would match a template on the server
+            templateId: "3", // This would match a template on the server
             audioBufferBase64: audioBuffer.toString('base64')
         };
 

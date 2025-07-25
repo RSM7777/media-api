@@ -75,15 +75,14 @@ function extractSvgBase64(html) {
 async function renderSvgToPng(svgPath, outputPath) {
     const svgBuffer = await fs.readFile(svgPath);
     const image = await loadImage(svgBuffer);
-    const aspectRatio = image.width / image.height;
-    const targetWidth = 1280;
-    const targetHeight = Math.round(targetWidth / aspectRatio);
-    const canvas = createCanvas(targetWidth, targetHeight);
+    const canvas = createCanvas(image.width, image.height);
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(image, 0, 0);
     const pngBuffer = canvas.toBuffer('image/png');
     await fs.writeFile(outputPath, pngBuffer);
-    return { width: targetWidth, height: targetHeight };
+    // We still need the dimensions for the scroll calculation
+    const headerDimensions = await getImageDimensions(outputPath);
+    return headerDimensions;
 }
 
 async function renderTextToImage(letterData, outputPath) {
@@ -185,32 +184,37 @@ function getAudioDuration(audioPath) {
 }
 
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
-    const videoWidth = 1280; const videoHeight = 720;
-    const headerHeight = headerImage.height;
-    const totalImageHeight = headerHeight + bodyImage.height; 
+    const videoWidth = 1280;
+    const videoHeight = 720;
+    
+    // We get the scaled header height after FFmpeg processes it, so we need to calculate it
+    const scaledHeaderHeight = Math.round(videoWidth * (headerImage.height / headerImage.width));
+    const totalImageHeight = scaledHeaderHeight + bodyImage.height;
     const scrollHeight = Math.max(0, totalImageHeight - videoHeight);
 
     return new Promise((resolve, reject) => {
         ffmpeg()
-            .input(headerPath)
-            .input(bodyPath)
-            .input(audioPath)
+            .input(headerPath)             // Input [0:v]
+            .input(bodyPath)               // Input [1:v]
+            .input(audioPath)              // Input [2:a]
             .complexFilter([
-                `[1:v]pad=width=1280:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
-                `[0:v][padded_body]vstack=inputs=2[letter]`,
-                `color=s=1280x720:c=white[bg]`,
+                // Take the header image [0:v] and scale it to fit the 1280px video width
+                `[0:v]scale=${videoWidth}:-1[scaled_header]`,
+                // Pad the body image to be 1280px wide
+                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
+                // Stack the SCALED header and the padded body
+                `[scaled_header][padded_body]vstack=inputs=2[letter]`,
+                // Create the final background
+                `color=s=${videoWidth}x=${videoHeight}:c=white[bg]`,
+                // Overlay and scroll the final combined letter
                 `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
             .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
             .toFormat('mp4')
             .on('end', resolve)
-            // --- ADDED DETAILED ERROR LOGGING ---
             .on('error', (err, stdout, stderr) => {
-                console.error('--- FFMPEG ERROR ---');
-                console.error('Error message:', err.message);
-                console.error('--- FFMPEG STDERR ---');
-                console.error(stderr);
+                console.error('--- FFMPEG STDERR ---', stderr);
                 reject(new Error(`FFMPEG failed: ${err.message}`));
             })
             .save(outputPath);
