@@ -252,6 +252,14 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
             .input(headerPath)
             .input(bodyPath)
             .input(audioPath)
+            .complexFilter([
+                // `[0:v]scale=${videoWidth}:-1[scaled_header]`,
+                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
+                `[scaled_header][padded_body]vstack=inputs=2[letter]`,
+                // THIS LINE IS NOW CORRECTED
+                `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
+                `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
+            ])
             .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
             .toFormat('mp4')
