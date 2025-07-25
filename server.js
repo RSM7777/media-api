@@ -2,9 +2,11 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import os from 'os';
-import puppeteer from 'puppeteer-core'; // Changed back to puppeteer-core
 import ffmpeg from 'fluent-ffmpeg';
+import { createCanvas, registerFont, loadImage } from 'canvas';
+import { htmlToText } from 'html-to-text';
 
+// --- FFMPEG SETUP ---
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
 ffmpeg.setFfmpegPath(ffmpegPath.path);
@@ -13,48 +15,22 @@ ffmpeg.setFfprobePath(ffprobePath.path);
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-// --- API Endpoint for PDF Generation ---
-app.post('/generate-pdf', async (req, res) => {
-    console.log('[API] Received request for PDF generation.');
-    const { htmlContent } = req.body;
-    if (!htmlContent) {
-        return res.status(400).send({ error: 'htmlContent is required.' });
-    }
-
-    let browser = null;
-    try {
-        // Using the specific path for the Azure environment
-        browser = await puppeteer.launch({
-            executablePath: '/usr/bin/google-chrome-stable',
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            headless: "new"
-        });
-        const page = await browser.newPage();
-        await page.goto(`data:text/html;charset=UTF-8,${encodeURIComponent(htmlContent)}`, { waitUntil: 'networkidle0' });
-        const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: { top: "25px", bottom: "25px", left: "25px", right: "25px" } });
-        
-        console.log('[API] PDF generated successfully.');
-        res.setHeader('Content-Type', 'application/pdf');
-        res.send(pdfBuffer);
-
-    } catch (error) {
-        console.error('[API] PDF generation failed:', error);
-        res.status(500).send({ error: 'Failed to generate PDF.' });
-    } finally {
-        if (browser) await browser.close();
-    }
-});
+// --- FONT REGISTRATION ---
+const FONT_PATH = path.join(process.cwd(), 'fonts', 'Lato-Regular.ttf');
+registerFont(FONT_PATH, { family: 'Lato' });
 
 
-// --- SIMPLIFIED API Endpoint for SCROLLING VIDEO Generation ---
 app.post('/generate-video', async (req, res) => {
     console.log('[API] Received request for /generate-video.');
     const { htmlContent, audioBufferBase64 } = req.body;
+    if (!htmlContent || !audioBufferBase64) {
+        return res.status(400).send({ error: 'htmlContent and audioBufferBase64 are required.' });
+    }
+
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
-    console.log(`[API LOG] Created temp directory: ${tempDir}`);
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
-        const videoBuffer = await generateLetterVideo(audioBuffer, htmlContent, tempDir);
+        const videoBuffer = await generateFastVideo(audioBuffer, htmlContent, tempDir);
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
     } catch (error) {
@@ -62,108 +38,125 @@ app.post('/generate-video', async (req, res) => {
         res.status(500).send({ error: 'Failed to generate video.' });
     } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
-        console.log(`[API LOG] Cleaned up temp directory: ${tempDir}`);
     }
 });
 
 
-// --- All other helper functions below have NO CHANGES ---
-
-async function generateLetterVideo(audioBuffer, htmlContent, tempDir) {
+// --- VIDEO ORCHESTRATION ---
+async function generateFastVideo(audioBuffer, htmlContent, tempDir) {
     const audioPath = path.join(tempDir, 'audio.wav');
-    const imagePath = path.join(tempDir, 'letter-image.png'); // We are back to one single image
+    const headerPath = path.join(tempDir, 'header.png');
+    const bodyPath = path.join(tempDir, 'body.png');
     const videoPath = path.join(tempDir, 'output.mp4');
 
     await fs.writeFile(audioPath, audioBuffer);
+
+    // Extract SVG and Text from the incoming HTML
+    const svgBase64 = extractSvgBase64(htmlContent);
+    const text = htmlToText(htmlContent, { selectors: [{ selector: 'div.content', format: 'inline' }] });
+
+    const svgBuffer = Buffer.from(svgBase64, 'base64');
+    
+    // Generate images using canvas
+    const headerImage = await renderSvgToPng(svgBuffer, headerPath);
+    const bodyImage = await renderTextToImage(text, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     
-    // Calls the new function to create one screenshot of the whole letter
-    await createFullLetterScreenshot(htmlContent, imagePath);
-    
-    // Uses the original scrolling video function
-    await createScrollingVideo(imagePath, audioPath, videoPath, audioDuration);
+    await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
     
     return await fs.readFile(videoPath);
 }
 
-async function createFullLetterScreenshot(htmlContent, outputPath) {
-    console.log('[PUPPETEER] Creating single screenshot of .container...');
-    let browser = null;
-    try {
-        browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome-stable', args: ['--no-sandbox'], headless: "new" });
-        const page = await browser.newPage();
-        await page.goto(`data:text/html;charset=UTF-8,${encodeURIComponent(htmlContent)}`, { waitUntil: 'networkidle0' });
-        console.log('[PUPPETEER] Page content loaded.');
+// --- HELPER FUNCTIONS ---
 
-        const letterContainer = await page.$('.container');
-        if (letterContainer) {
-            await letterContainer.screenshot({ path: outputPath });
-            console.log(`[PUPPETEER] Screenshot of .container saved successfully.`);
-        } else {
-            throw new Error('Could not find the main element with class="container" in the HTML.');
-        }
-    } finally {
-        if (browser) await browser.close();
+function extractSvgBase64(html) {
+    const match = html.match(/src='data:image\/svg\+xml;base64,([^']*)'/);
+    if (!match || !match[1]) {
+        throw new Error('Could not find or parse SVG data URI in HTML content.');
     }
+    return match[1];
 }
 
+async function renderSvgToPng(svgBuffer, outputPath) {
+    const image = await loadImage(svgBuffer);
+    const aspectRatio = image.width / image.height;
+    const targetWidth = 1280;
+    const targetHeight = Math.round(targetWidth / aspectRatio);
+    const canvas = createCanvas(targetWidth, targetHeight);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
+    const pngBuffer = canvas.toBuffer('image/png');
+    await fs.writeFile(outputPath, pngBuffer);
+    return { width: targetWidth, height: targetHeight };
+}
 
+async function renderTextToImage(text, outputPath) {
+    const textBlockWidth = 800; const canvasWidth = 800;
+    const fontSize = 24; const lineHeight = 36;
+    const tempCanvas = createCanvas(canvasWidth, 1);
+    const ctx = tempCanvas.getContext('2d');
+    ctx.font = `${fontSize}px Lato`;
+    
+    const words = text.split(' ');
+    let line = ''; const lines = [];
+    for (const word of words) {
+        const testLine = line + (line ? ' ' : '') + word;
+        if (ctx.measureText(testLine).width > textBlockWidth && line !== '') {
+            lines.push(line);
+            line = word;
+        } else {
+            line = testLine;
+        }
+    }
+    lines.push(line);
 
-
-async function createScrollingVideo(imagePath, audioPath, outputPath, duration) {
-    const imageDimensions = await getImageDimensions(imagePath);
-    const videoHeight = 720;
-    const videoWidth = 1280; // Assuming you want a 1280x720 output
-    const imageHeight = imageDimensions.height;
-    const scrollHeight = Math.max(0, imageHeight - videoHeight);
-
-    console.log(`[FFMPEG] Starting video encoding. Scroll height: ${scrollHeight}px`);
-
-    return new Promise((resolve, reject) => {
-        ffmpeg()
-            .input(imagePath)
-            .loop()
-            .input(audioPath)
-            .videoCodec('libx264')
-            .audioCodec('aac')
-            .audioBitrate('192k')
-            .outputOptions(['-preset veryfast', '-crf 23', '-pix_fmt yuv420p'])
-            .complexFilter([
-                // This filter places your letter image on a canvas and scrolls it
-                `color=s=${videoWidth}x${videoHeight}:c=white[bg]; [bg][0:v]overlay=x=(W-w)/2:y='-t/${duration}*${scrollHeight}'[out]`
-            ])
-            .duration(duration)
-            .outputOptions("-map", "[out]", "-map", "1:a")
-            .on('end', () => {
-                console.log('[FFMPEG] Video encoding finished.');
-                resolve();
-            })
-            .on('error', (err) => reject(new Error(`FFmpeg error: ${err.message}`)))
-            .save(outputPath);
-    });
+    const canvasHeight = (lines.length * lineHeight);
+    const finalCanvas = createCanvas(canvasWidth, canvasHeight);
+    const finalCtx = finalCanvas.getContext('2d');
+    finalCtx.fillStyle = '#fff'; finalCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+    finalCtx.font = `${fontSize}px Lato`; finalCtx.fillStyle = '#444'; finalCtx.textBaseline = 'top';
+    for (let i = 0; i < lines.length; i++) {
+        finalCtx.fillText(lines[i], 0, (i * lineHeight));
+    }
+    const buffer = finalCanvas.toBuffer('image/png');
+    await fs.writeFile(outputPath, buffer);
+    return { width: canvasWidth, height: canvasHeight };
 }
 
 function getAudioDuration(audioPath) {
     return new Promise((resolve, reject) => {
         ffmpeg.ffprobe(audioPath, (err, metadata) => {
-            if (err) return reject(new Error(`ffprobe error: ${err.message}`));
-            if (!metadata?.format?.duration) return reject(new Error('Could not determine audio duration.'));
+            if (err || !metadata?.format?.duration) return reject(new Error(`Could not get audio duration: ${err?.message || 'Unknown error'}`));
             resolve(metadata.format.duration);
         });
     });
 }
 
-function getImageDimensions(imagePath) {
+async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
+    const videoWidth = 1280; const videoHeight = 720;
+    const headerHeight = headerImage.height;
+    const totalImageHeight = headerHeight + bodyImage.height; 
+    const scrollHeight = Math.max(0, totalImageHeight - videoHeight);
+
     return new Promise((resolve, reject) => {
-        ffmpeg.ffprobe(imagePath, (err, metadata) => {
-            if (err || !metadata.streams[0].width || !metadata.streams[0].height) {
-                return reject(new Error(`Could not get image dimensions: ${err?.message || 'Unknown error'}`));
-            }
-            resolve({ width: metadata.streams[0].width, height: metadata.streams[0].height });
-        });
+        ffmpeg()
+            .input(headerPath)
+            .input(bodyPath)
+            .input(audioPath)
+            .complexFilter([
+                `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
+                `[0:v][padded_body]vstack=inputs=2[letter]`,
+                `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
+                `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
+            ])
+            .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
+            .duration(audioDuration)
+            .toFormat('mp4')
+            .on('end', resolve)
+            .on('error', (err) => reject(new Error(`FFMPEG failed: ${err.message}`)))
+            .save(outputPath);
     });
 }
-
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {

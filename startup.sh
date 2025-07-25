@@ -1,15 +1,17 @@
 #!/bin/bash
 
-# Update and install dependencies
+echo "--- INSTALLING SYSTEM DEPENDENCIES FOR CANVAS & FFMPEG ---"
 apt-get update
-apt-get install -y ffmpeg wget ca-certificates fonts-liberation libappindicator3-1 libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 libgdk-pixbuf2.0-0 libnspr4 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 xdg-utils libgbm-dev
+# Added dependencies for node-canvas
+apt-get install -y build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
 
-# Download and install Google Chrome Stable
+# Dependencies for Puppeteer/Chrome and FFmpeg
+apt-get install -y ffmpeg wget ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libcups2 libgdk-pixbuf2.0-0 libnspr4 libnss3 libxrandr2 xdg-utils libgbm-dev
+
+echo "--- INSTALLING GOOGLE CHROME ---"
 wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y ./google-chrome-stable_current_amd64.deb
-
-# Clean up
 rm google-chrome-stable_current_amd64.deb
 
-# Start your Node.js application
+echo "--- STARTING NODE APP ---"
 npm start
