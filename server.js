@@ -4,26 +4,33 @@ import fs from 'fs/promises';
 import os from 'os';
 import ffmpeg from 'fluent-ffmpeg';
 import { createCanvas, registerFont, loadImage } from 'canvas';
-import { htmlToText } from 'html-to-text';
-import puppeteer from 'puppeteer-core'; // We need puppeteer back for this one task
+import puppeteer from 'puppeteer-core';
 
+// --- GLOBAL BROWSER INSTANCE ---
+// We will launch one browser when the server starts and reuse it.
+let browserInstance;
 
-// --- FFMPEG SETUP ---
+// --- FFMPEG & FONT SETUP ---
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
 
+const FONT_PATH = path.join(process.cwd(), 'fonts', 'Lato-Regular.ttf');
+registerFont(FONT_PATH, { family: 'Lato' });
+const TITLE_FONT_PATH = path.join(process.cwd(), 'fonts', 'PlayfairDisplay-Bold.ttf');
+registerFont(TITLE_FONT_PATH, { family: 'Playfair Display' });
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-// --- FONT REGISTRATION ---
-const FONT_PATH = path.join(process.cwd(), 'test-data', 'Lato-Regular.ttf');
-registerFont(FONT_PATH, { family: 'Lato' });
-
-
+// --- API ENDPOINT ---
 app.post('/generate-video', async (req, res) => {
     const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
+    if (!audioBufferBase64) {
+        return res.status(400).send({ error: 'Audio data is missing.' });
+    }
+    
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
@@ -38,8 +45,6 @@ app.post('/generate-video', async (req, res) => {
     }
 });
 
-
-
 // --- VIDEO ORCHESTRATION ---
 async function generateFastVideo(audioBuffer, letterData, tempDir) {
     const audioPath = path.join(tempDir, 'audio.wav');
@@ -48,11 +53,10 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     const videoPath = path.join(tempDir, 'output.mp4');
 
     await fs.writeFile(audioPath, audioBuffer);
-    
     const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
 
-    // Use the new, fast canvas method for BOTH images
-    const headerImage = await renderSvgToPng(templateSvgPath, headerPath);
+    // Use Puppeteer for the header, Canvas for the body
+    const headerImage = await renderSvgWithPuppeteer(templateSvgPath, headerPath);
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     
@@ -61,51 +65,36 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     return await fs.readFile(videoPath);
 }
 
+
+// --- HELPER FUNCTIONS ---
+
 /**
- * FINAL, CORRECTED VERSION: Renders the SVG at high resolution for perfect quality.
+ * Uses the persistent browser instance for fast, high-quality SVG rendering.
  */
-async function renderSvgToPng_Puppeteer(svgPath, outputPath) {
-    console.log('[PUPPETEER] Rendering SVG to PNG for perfect quality...');
-    let browser = null;
+async function renderSvgWithPuppeteer(svgPath, outputPath) {
+    if (!browserInstance) {
+        throw new Error('Browser is not initialized.');
+    }
+    let page = null;
     try {
-        browser = await puppeteer.launch({
-            executablePath: '/usr/bin/google-chrome-stable',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-        const page = await browser.newPage();
-
-        // Set the browser viewport to the final video width
+        page = await browserInstance.newPage();
         await page.setViewport({ width: 1280, height: 720 });
-
         const svgContent = await fs.readFile(svgPath, 'utf-8');
-        
-        // Set page content with CSS to make the SVG fill the width
         await page.setContent(`
-            <html>
-              <head>
-                <style>
-                  body, html { margin: 0; padding: 0; }
-                  svg { width: 100%; height: auto; display: block; }
-                </style>
-              </head>
-              <body>${svgContent}</body>
-            </html>
+            <html><body style="margin:0;padding:0;">${svgContent}</body></html>
         `);
-        
         const svgElement = await page.$('svg');
         if (!svgElement) throw new Error('SVG element not found in template file.');
-
-        await svgElement.screenshot({ path: outputPath });
         
-        console.log(`[PUPPETEER] High-quality header image saved successfully.`);
+        await svgElement.screenshot({ path: outputPath, omitBackground: true });
         return await getImageDimensions(outputPath);
     } finally {
-        if (browser) await browser.close();
+        if (page) await page.close();
     }
 }
 
 function getImageDimensions(imagePath) {
-     return new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         ffmpeg.ffprobe(imagePath, (err, metadata) => {
             if (err || !metadata.streams[0]?.width || !metadata.streams[0]?.height) {
                 return reject(new Error(`Could not get image dimensions: ${err?.message || 'Unknown error'}`));
@@ -115,75 +104,31 @@ function getImageDimensions(imagePath) {
     });
 }
 
-// --- HELPER FUNCTIONS ---
-
-function extractSvgBase64(html) {
-    const match = html.match(/src='data:image\/svg\+xml;base64,([^']*)'/);
-    if (!match || !match[1]) {
-        throw new Error('Could not find or parse SVG data URI in HTML content.');
-    }
-    return match[1];
-}
-
 /**
- * FINAL VERSION: Renders SVG to PNG at high quality WITHOUT Puppeteer.
+ * Renders all text components with correct styling and layout using node-canvas.
  */
-async function renderSvgToPng(svgPath, outputPath) {
-    console.log('[CANVAS] Rendering SVG to PNG with correct aspect ratio...');
-    const svgContent = await fs.readFile(svgPath, 'utf-8');
-    
-    // Manually parse width/height from the SVG tag to get the correct aspect ratio
-    const widthMatch = svgContent.match(/width="(\d+)"/);
-    const heightMatch = svgContent.match(/height="(\d+)"/);
-    if (!widthMatch || !heightMatch) {
-        throw new Error('SVG file must have explicit width and height attributes.');
-    }
-    const width = parseInt(widthMatch[1], 10);
-    const height = parseInt(heightMatch[1], 10);
-    const aspectRatio = width / height;
-
-    // Render it to a high-quality PNG
-    const targetWidth = 1280;
-    const targetHeight = Math.round(targetWidth / aspectRatio);
-
-    const image = await loadImage(Buffer.from(svgContent));
-    const canvas = createCanvas(targetWidth, targetHeight);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(image, 0, 0, targetWidth, targetHeight);
-    
-    const pngBuffer = canvas.toBuffer('image/png');
-    await fs.writeFile(outputPath, pngBuffer);
-    return { width: targetWidth, height: targetHeight };
-}
-
 async function renderTextToImage(letterData, outputPath) {
-    const canvasWidth = 1040; // The width of the final text block
+    const canvasWidth = 1040;
     const padding = 40;
     const textBlockWidth = canvasWidth - (2 * padding);
     
     const tempCtx = createCanvas(1, 1).getContext('2d');
     let currentY = padding;
 
-    // --- Calculate layout for all text elements to determine final image height ---
     tempCtx.font = '700 48px "Playfair Display"';
-    const titleLines = wrapText(tempCtx, letterData.title || 'Your Title', textBlockWidth);
-    currentY += titleLines.length * 60; // 60px line height for title
-    
-    currentY += 60; // Space after title
+    const titleLines = wrapText(tempCtx, letterData.title || '', textBlockWidth);
+    currentY += titleLines.length * 60;
+    currentY += 60;
     
     tempCtx.font = '24px Lato';
     const contentLines = wrapText(tempCtx, letterData.content || '', textBlockWidth);
-    currentY += contentLines.length * 44; // 44px line height for content
-
-    currentY += 60; // Space after content
+    currentY += contentLines.length * 44;
+    currentY += 60;
     
     tempCtx.font = 'italic 28px "Playfair Display"';
-    const authorText = `- ${letterData.authorName || ''}`;
-    currentY += 40; // line height for author
-
+    currentY += 40;
     const canvasHeight = currentY + padding;
 
-    // --- Create final canvas and draw everything ---
     const finalCanvas = createCanvas(canvasWidth, canvasHeight);
     const ctx = finalCanvas.getContext('2d');
     ctx.fillStyle = '#ffffff';
@@ -191,7 +136,6 @@ async function renderTextToImage(letterData, outputPath) {
 
     currentY = padding;
 
-    // Draw Title
     ctx.font = '700 48px "Playfair Display"';
     ctx.fillStyle = '#333';
     ctx.textAlign = 'center';
@@ -201,7 +145,6 @@ async function renderTextToImage(letterData, outputPath) {
     }
     currentY += 60;
 
-    // Draw Content
     ctx.font = '24px Lato';
     ctx.fillStyle = '#444';
     ctx.textAlign = 'left';
@@ -211,10 +154,9 @@ async function renderTextToImage(letterData, outputPath) {
     }
     currentY += 60;
 
-    // Draw Author
     ctx.font = 'italic 28px "Playfair Display"';
     ctx.fillStyle = '#555';
-    ctx.textAlign = 'left';
+    const authorText = `- ${letterData.authorName || ''}`;
     ctx.fillText(authorText, padding, currentY);
 
     const buffer = finalCanvas.toBuffer('image/png');
@@ -226,13 +168,8 @@ function wrapText(context, text, maxWidth) {
     const words = text.replace(/\n/g, ' \n ').split(' ');
     const lines = [];
     let currentLine = '';
-
     for (const word of words) {
-        if (word === '\n') {
-            lines.push(currentLine);
-            currentLine = '';
-            continue;
-        }
+        if (word === '\n') { lines.push(currentLine); currentLine = ''; continue; }
         const testLine = currentLine + (currentLine ? ' ' : '') + word;
         if (context.measureText(testLine).width > maxWidth && currentLine !== '') {
             lines.push(currentLine);
@@ -254,14 +191,10 @@ function getAudioDuration(audioPath) {
     });
 }
 
-
-
-
 async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, outputPath) {
     const videoWidth = 1280;
     const videoHeight = 720;
-    const headerHeight = headerImage.height;
-    const totalImageHeight = headerHeight + bodyImage.height;
+    const totalImageHeight = headerImage.height + bodyImage.height;
     const scrollHeight = Math.max(0, totalImageHeight - videoHeight);
 
     return new Promise((resolve, reject) => {
@@ -275,15 +208,7 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
                 `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
                 `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
-            .outputOptions([
-                '-map', '[out]',
-                '-map', '2:a',
-                '-c:v', 'libx264',
-                '-preset', 'veryfast',
-                '-crf', '23',
-                // CORRECTED LINE
-                '-pix_fmt', 'yuv420p'
-            ])
+            .outputOptions(['-map', '[out]', '-map', '2:a', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'])
             .duration(audioDuration)
             .toFormat('mp4')
             .on('end', resolve)
@@ -295,7 +220,25 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
     });
 }
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-    console.log(`🚀 Media Generation API is running on port ${PORT}`);
-});
+
+// --- SERVER INITIALIZATION ---
+async function startServer() {
+    console.log('Initializing persistent browser instance...');
+    try {
+        browserInstance = await puppeteer.launch({
+            executablePath: '/usr/bin/google-chrome-stable',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        console.log('✅ Browser initialized successfully.');
+        
+        const PORT = process.env.PORT || 8080;
+        app.listen(PORT, () => {
+            console.log(`🚀 Media Generation API is running on port ${PORT}`);
+        });
+    } catch (err) {
+        console.error('❌ Failed to launch browser:', err);
+        process.exit(1);
+    }
+}
+
+startServer();
