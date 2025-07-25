@@ -248,17 +248,13 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
 
     return new Promise((resolve, reject) => {
         ffmpeg()
-            .input(headerPath)             // Input [0:v]
-            .input(bodyPath)               // Input [1:v]
-            .input(audioPath)              // Input [2:a]
+            .input(headerPath)
+            .input(bodyPath)
+            .input(audioPath)
             .complexFilter([
-                // Pad the body image to be 1280px wide to match the header
                 `[1:v]pad=width=${videoWidth}:height=ih:x=(ow-iw)/2:y=0:color=white[padded_body]`,
-                // CORRECTED: Use the original header stream [0:v]
                 `[0:v][padded_body]vstack=inputs=2[letter]`,
-                // Create the final video background
                 `color=s=${videoWidth}x${videoHeight}:c=white[bg]`,
-                // Overlay and scroll the 'letter'
                 `[bg][letter]overlay=x=(W-w)/2:y='-t/${audioDuration}*${scrollHeight}'[out]`
             ])
             .outputOptions([
@@ -267,7 +263,8 @@ async function composeVideo(headerImage, bodyImage, audioDuration, headerPath, b
                 '-c:v', 'libx264',
                 '-preset', 'veryfast',
                 '-crf', '23',
-                '-pix_fmt', 'yuv4p'
+                // CORRECTED LINE
+                '-pix_fmt', 'yuv420p'
             ])
             .duration(audioDuration)
             .toFormat('mp4')
