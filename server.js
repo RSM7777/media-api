@@ -21,26 +21,10 @@ registerFont(FONT_PATH, { family: 'Lato' });
 
 
 app.post('/generate-video', async (req, res) => {
-    console.log('[API] Received request for /generate-video.');
     const { title, content, authorName, templateId, audioBufferBase64 } = req.body;
-    
-    // --- AUDIO DEBUG LOG #1: Check if data was received ---
-    console.log(`[AUDIO DEBUG] Received audioBufferBase64 with length: ${audioBufferBase64 ? audioBufferBase64.length : '0'}`);
-
-    if (!audioBufferBase64 || audioBufferBase64.length < 100) {
-        return res.status(400).send({ error: 'Audio data is missing or empty.' });
-    }
-
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-gen-'));
     try {
         const audioBuffer = Buffer.from(audioBufferBase64, 'base64');
-        
-        // --- AUDIO DEBUG LOG #2: Check if data was decoded correctly ---
-        console.log(`[AUDIO DEBUG] Decoded audioBuffer with size: ${audioBuffer.length} bytes.`);
-        if (audioBuffer.length < 100) { // A valid WAV file header is ~44 bytes, so < 100 is suspicious.
-             console.error('[AUDIO DEBUG] Audio buffer is too small. It might be empty or corrupt.');
-        }
-
         const videoBuffer = await generateFastVideo(audioBuffer, { title, content, authorName, templateId }, tempDir);
         res.setHeader('Content-Type', 'video/mp4');
         res.send(videoBuffer);
@@ -63,11 +47,14 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
 
     await fs.writeFile(audioPath, audioBuffer);
     
-    // The API now finds the template SVG based on the ID it receives
-    const templateSvgPath = path.join(process.cwd(), 'test-data', `template.svg`); // Simplified to use one template for the test
+    // --- THIS IS THE KEY CHANGE ---
+    // Use the templateId to build the correct path to the SVG file
+    const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
+    console.log(`Loading template: ${templateSvgPath}`);
+    // --- END OF CHANGE ---
 
     const headerImage = await renderSvgToPng(templateSvgPath, headerPath);
-    const bodyImage = await renderTextToImage(letterData, bodyPath); // Pass all text data to the renderer
+    const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
     
     await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
