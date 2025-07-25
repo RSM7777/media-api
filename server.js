@@ -23,24 +23,22 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 async function buildPdfHtml(letterData) {
-    const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
     let templateImageUrl = null;
-    try {
-        const svgBuffer = await fs.readFile(templateSvgPath);
-        templateImageUrl = `data:image/svg+xml;base64,${svgBuffer.toString('base64')}`;
-    } catch (e) {
-        console.warn(`Could not load template SVG for PDF for ID: ${letterData.templateId}`);
+    if (letterData.templateId) {
+        try {
+            const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
+            const svgBuffer = await fs.readFile(templateSvgPath);
+            templateImageUrl = `data:image/svg+xml;base64,${svgBuffer.toString('base64')}`;
+        } catch (e) {
+            console.warn(`Could not load template SVG for PDF for ID: ${letterData.templateId}`);
+        }
     }
-
-    // This uses the same HTML structure from your original template
+    // Simple HTML structure
     return `
         <!DOCTYPE html><html><head><style>
-            body { margin: 0; font-family: 'Lato', sans-serif; }
-            .container { padding: 40px; }
-            .header-image { width: 100%; margin-bottom: 40px; }
-            .title { font-size: 48px; font-family: 'Playfair Display', serif; text-align: center; }
-            .content { font-size: 16px; line-height: 1.7; }
-            .author { margin-top: 40px; font-style: italic; }
+            body { margin: 0; font-family: 'Lato', sans-serif; } .container { padding: 40px; }
+            .header-image { width: 100%; margin-bottom: 40px; } .title { font-size: 48px; font-family: 'Playfair Display', serif; text-align: center; }
+            .content { font-size: 16px; line-height: 1.7; white-space: pre-wrap; } .author { margin-top: 40px; font-style: italic; }
         </style></head><body>
             <div class="container">
                 ${templateImageUrl ? `<img src="${templateImageUrl}" class="header-image" />` : ''}
@@ -50,20 +48,15 @@ async function buildPdfHtml(letterData) {
             </div>
         </body></html>
     `;
-}  
+}
 
 app.post('/generate-pdf', async (req, res) => {
-    console.log('[API] Received request for /generate-pdf.');
-    if (!browserInstance) {
-        return res.status(503).send({ error: 'Browser service is not ready.' });
-    }
     let page = null;
     try {
-        const htmlContent = await buildPdfHtml(req.body); // Build HTML on the server
+        const htmlContent = await buildPdfHtml(req.body);
         page = await browserInstance.newPage();
         await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
         const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true, margin: { top: "25px", bottom: "25px", left: "25px", right: "25px" } });
-        console.log('[API] PDF generated successfully.');
         res.setHeader('Content-Type', 'application/pdf');
         res.send(pdfBuffer);
     } catch (error) {
@@ -98,16 +91,22 @@ async function generateFastVideo(audioBuffer, letterData, tempDir) {
     const headerPath = path.join(tempDir, 'header.png');
     const bodyPath = path.join(tempDir, 'body.png');
     const videoPath = path.join(tempDir, 'output.mp4');
-
     await fs.writeFile(audioPath, audioBuffer);
-    const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
+    
+    let headerImage;
+    if (letterData.templateId) {
+        const templateSvgPath = path.join(process.cwd(), 'templates', `template${letterData.templateId}.svg`);
+        headerImage = await renderSvgWithPuppeteer(templateSvgPath, headerPath);
+    } else {
+        // Create a tiny transparent png if no template is provided
+        const canvas = createCanvas(1, 1);
+        await fs.writeFile(headerPath, canvas.toBuffer('image/png'));
+        headerImage = { width: 1, height: 1 };
+    }
 
-    const headerImage = await renderSvgWithPuppeteer(templateSvgPath, headerPath);
     const bodyImage = await renderTextToImage(letterData, bodyPath);
     const audioDuration = await getAudioDuration(audioPath);
-    
     await composeVideo(headerImage, bodyImage, audioDuration, headerPath, bodyPath, audioPath, videoPath);
-    
     return await fs.readFile(videoPath);
 }
 
